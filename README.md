@@ -1,53 +1,56 @@
 # TurboQuant + RotorQuant
 
-A from-scratch PyTorch implementation of [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026), Google's two-stage vector quantization algorithm for compressing LLM key-value caches — plus **RotorQuant**, a Clifford algebra reimagining that is **10-650x faster** with **44x fewer parameters**, now with **Triton GPU kernels** for portable, auto-tuned acceleration.
+A from-scratch PyTorch implementation of [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026), Google's two-stage vector quantization algorithm for compressing LLM key-value caches — plus **RotorQuant**, a Clifford algebra reimagining with **44x fewer parameters** and **Triton GPU kernels** for the quantize/dequantize pipeline.
 
 ## Quick Results
 
-### RotorQuant + Triton — Fused Kernel Speed (NEW)
+### RotorQuant High-Context Generation (NEW)
 
-Tested on RTX 5090, d=128, 3-bit quantization:
+3-bit RotorQuant with post-prefill quantization on Qwen2.5-3B-Instruct:
 
-| n_vectors | TurboQuant (PyTorch) | RQ PyTorch | **RQ Triton** | Triton vs TQ |
-|-----------|---------------------|------------|--------------|--------------|
-| 1,024 | 36 us | 3.63 ms | **19 us** | **1.9x faster** |
-| 4,096 | 63 us | 2.32 ms | **16 us** | **3.9x faster** |
-| 16,384 | 212 us | 5.18 ms | **15 us** | **14x faster** |
-| 65,536 | — | 28.13 ms | **43 us** | — |
+| Context | Speed | VRAM | Needle-in-Haystack |
+|---------|-------|------|--------------------|
+| 2K | 4.5 tok/s | 2.4 GB | **FOUND** — "AURORA-7749" |
+| 8K | 4.9 tok/s | 3.1 GB | **FOUND** |
+| 16K | 6.4 tok/s | 4.0 GB | **FOUND** |
+| 32K | 1.9 tok/s | 5.9 GB | **FOUND** |
+| 65K | 0.9 tok/s | 9.6 GB | **FOUND** |
+| 93K | 2.2 tok/s | 12.8 GB | **FOUND** (RTX 5090) |
 
-The Triton full-fused kernel is **100-650x faster** than the PyTorch RotorQuant path, because it fuses the entire embed→rotor→quantize→unrotor→extract pipeline into a single GPU kernel launch.
+FP16 baseline: ~40-50 tok/s. RotorQuant trades speed for memory — it's a **memory optimization**, not a speed optimization. The quantize/dequantize overhead slows generation, but enables fitting much longer contexts in VRAM.
 
-### RotorQuant vs TurboQuant — CUDA Fused Kernel Speed
+### MSE Quality (after codebook fix)
 
-Tested on RTX PRO 4000 Blackwell, d=128, 3-bit quantization:
+RotorQuant now **matches TurboQuant exactly** on reconstruction quality:
 
-| n_vectors | TurboQuant | RQ PyTorch | **RQ CUDA** | CUDA vs TQ |
-|-----------|-----------|------------|------------|------------|
-| 1,024 | 69 us | 3.30 ms | **6 us** | **11x faster** |
-| 4,096 | 132 us | 3.86 ms | **12 us** | **11x faster** |
-| 8,192 | 285 us | 4.70 ms | **20 us** | **14x faster** |
-| 16,384 | 740 us | 6.71 ms | **39 us** | **19x faster** |
+| Bits | TurboQuant MSE | RotorQuant MSE | Ratio | Cosine Sim |
+|------|---------------|---------------|-------|------------|
+| 2 | 0.116 | 0.116 | **1.0x** | 0.941 |
+| 3 | 0.034 | 0.034 | **1.0x** | 0.983 |
+| 4 | 0.009 | 0.009 | **1.0x** | 0.995 |
 
-### Real Model Validation (Qwen2.5-3B-Instruct)
+This was achieved by fixing two bugs: correct Lloyd-Max `d_eff` parameter and adding norm separation (see [Codebook Fix](#codebook-calibration-fix) below).
 
-On actual KV cache data, RotorQuant **matches TurboQuant's attention fidelity** despite using 44x fewer parameters:
+### Triton Kernel Speed (quantize/dequantize operation)
 
-| Context | Bits | Method | Cosine Sim | Top-1 | Top-5 |
-|---------|------|--------|------------|-------|-------|
-| 2K | 3-bit | TurboQuant | 0.9906 | 81.2% | 93.8% |
-| 2K | 3-bit | **RotorQuant** | 0.9903 | 81.2% | 93.8% |
-| 4K | 4-bit | TurboQuant | 0.9880 | 75.0% | 93.8% |
-| 4K | 4-bit | **RotorQuant** | 0.9874 | **81.2%** | 93.8% |
+The Triton fused kernel is 100-650x faster than PyTorch for the quantize-dequantize roundtrip. **Note**: this measures the kernel itself, not end-to-end inference throughput.
 
-RotorQuant beats TurboQuant on top-1 accuracy at 4K/4-bit — the Clifford rotor decorrelation better preserves directional structure of real KV cache vectors.
+| n_vectors | RQ PyTorch | **RQ Triton** | Speedup |
+|-----------|------------|--------------|---------|
+| 1,024 | 3.22 ms | 0.015 ms | **212x** |
+| 4,096 | 3.46 ms | 0.015 ms | **229x** |
+| 16,384 | 5.10 ms | 0.017 ms | **295x** |
+| 65,536 | 28.13 ms | 0.043 ms | **652x** |
+
+Tested on RTX 5090, d=128, 3-bit. The Triton kernel fuses the entire embed→rotor→quantize→unrotor→extract pipeline into a single GPU kernel launch.
 
 ### Parameter Efficiency
 
 | Method | Parameters (d=128) | Breakdown |
 |--------|-------------------|-----------|
 | TurboQuant | 16,399 | 128x128 rotation matrix + codebook |
-| **RotorQuant** | **372** | 43 rotors x 8 + 4 grade codebooks |
-| **Ratio** | **44x fewer** | |
+| **RotorQuant** | **~380** | 43 rotors x 8 + 4 grade codebooks |
+| **Ratio** | **~44x fewer** | |
 
 At d=4096 (typical LLM head dim): TQ needs 16.7M params, RQ needs ~11K.
 
@@ -94,6 +97,25 @@ A **rotor** R has only 4 non-zero components: `R = [s, 0, 0, 0, b12, b13, b23, 0
 | Preserves | Norms + inner products | Norms + inner products + outer products + grades |
 | Composition | Pi2 Pi1 (matrix multiply) | R2 R1 (geometric product) |
 
+### Codebook Calibration Fix
+
+The original RotorQuant had 2-4x worse MSE than TurboQuant. Two fixes brought it to exact parity:
+
+1. **`d_eff` parameter**: The Lloyd-Max codebook was built with `d_eff = n_groups * 8 = 344`, making the Gaussian approximation use σ = 1/√344 ≈ 0.054. But after the rotor sandwich, vector-grade components have σ ≈ 1/√128 ≈ 0.088. The codebook centroids only covered ±0.116 when values ranged to ±0.50, clipping 67% of outlier magnitude. Fix: use `d_eff = d` (the original vector dimension).
+
+2. **Norm separation**: Vectors must be normalized to the unit sphere before quantization. The codebook is designed for unit-sphere coordinates. Store norms separately and rescale after dequantization. This matches TurboQuant's approach.
+
+### Post-Prefill Quantization
+
+Naively quantizing keys during the forward pass causes error to compound through 36 layers — each layer's quantization noise feeds into the next. Both TurboQuant and RotorQuant produce garbage output with this approach.
+
+The fix is **post-prefill quantization**:
+1. **Prefill** runs at full FP16 precision — no quantization, no error compounding
+2. **First decode step**: bulk-quantize the entire prefill cache via Triton fused kernel
+3. **Each decode step**: quantize the new key for storage, but return the full-precision key for the current token's attention
+
+This gives perfect prefill quality with compressed cache for decode.
+
 ### The Fused CUDA Kernel
 
 The entire pipeline runs in a single kernel launch:
@@ -102,59 +124,7 @@ The entire pipeline runs in a single kernel launch:
 embed (3 dims -> multivector) -> R x R_tilde -> Lloyd-Max quantize -> R_tilde x R -> extract
 ```
 
-Each thread handles one (batch_item, group) pair. Rotors and codebooks are loaded into shared memory. The sparse geometric product (`gp_rotor_mv`) uses only 28 FMAs instead of 64 for the full product.
-
-## Synthetic Benchmark Results
-
-### MSE Distortion (d=128, 2000 random unit vectors)
-
-| Bits | TurboQuant | RotorQuant | Theory Bound | Winner |
-|------|-----------|-----------|-------------|--------|
-| 1 | **0.361** | 0.457 | 0.680 | TQ |
-| 2 | **0.116** | 0.197 | 0.170 | TQ |
-| 3 | **0.034** | 0.081 | 0.043 | TQ |
-| 4 | **0.009** | 0.032 | 0.011 | TQ |
-
-TurboQuant wins on raw MSE — its full d x d rotation exactly induces the Beta distribution Lloyd-Max was optimized for. RotorQuant's 3-at-a-time grouping changes the distribution.
-
-### Inner Product Preservation (d=128, 3000 pairs)
-
-| Bits | Method | Bias | RMSE | Correlation |
-|------|--------|------|------|-------------|
-| 2 | TQ | +0.001 | 0.063 | 0.818 |
-| 2 | RQ | -0.001 | 0.075 | 0.767 |
-| 3 | TQ | -0.000 | 0.037 | **0.918** |
-| 3 | RQ | +0.001 | 0.048 | 0.878 |
-| 4 | TQ | +0.001 | 0.020 | **0.974** |
-| 4 | RQ | -0.001 | 0.031 | 0.943 |
-
-Both are unbiased (near-zero bias) thanks to QJL correction. TQ has better correlation on random vectors, but the gap narrows on real model data.
-
-### Needle-in-Haystack Retrieval
-
-**Perfect 9/9** for both methods across all bit-widths (2, 3, 4) and context lengths (512, 2048, 8192).
-
-### Rotation Equivariance
-
-Testing `quantize(R@x)` vs `R@quantize(x)` — how well each method handles pre-rotated data:
-
-| Bits | Method | Equivariance Error | Cosine Sim |
-|------|--------|-------------------|------------|
-| 3 | TQ | 0.258 | 0.966 |
-| 3 | RQ | 0.306 | 0.935 |
-| 4 | TQ | 0.136 | 0.991 |
-| 4 | RQ | 0.217 | 0.972 |
-
-### Profiling Breakdown (before CUDA kernel)
-
-| Step | Time | % of Total |
-|------|------|-----------|
-| Rotor sandwich (forward) | 1620 us | 41% |
-| Rotor sandwich (inverse) | 1534 us | 39% |
-| Lloyd-Max quantize | 639 us | 16% |
-| Embed/extract | 137 us | 4% |
-
-The fused CUDA kernel eliminated this bottleneck entirely — the full pipeline now takes 6-39 us.
+Each thread handles one (batch_item, group) pair. Rotors and codebooks are loaded into shared memory. The sparse geometric product uses only 28 FMAs instead of 64 for the full product.
 
 ## Real Model Validation
 
@@ -177,21 +147,6 @@ The fused CUDA kernel eliminated this bottleneck entirely — the full pipeline 
 
 **3-bit is the sweet spot**: 5x compression with 99.5% attention fidelity. At 128K context, that's ~3.6 GB instead of ~18 GB — fitting on a single 24GB GPU.
 
-### RotorQuant vs TurboQuant on Real KV Cache (8/36 layers, 16 heads)
-
-| Context | Bits | Method | Cosine Sim | Top-1 | Top-5 |
-|---------|------|--------|------------|-------|-------|
-| 2K | 3-bit | TQ | 0.9906 | 81.2% | 93.8% |
-| 2K | 3-bit | **RQ** | 0.9903 | 81.2% | 93.8% |
-| 2K | 4-bit | TQ | 0.9911 | 81.2% | 93.8% |
-| 2K | 4-bit | **RQ** | 0.9906 | 81.2% | 93.8% |
-| 4K | 3-bit | TQ | 0.9875 | 81.2% | 87.5% |
-| 4K | 3-bit | **RQ** | 0.9870 | 81.2% | **93.8%** |
-| 4K | 4-bit | TQ | 0.9880 | 75.0% | 93.8% |
-| 4K | 4-bit | **RQ** | 0.9874 | **81.2%** | 93.8% |
-
-RotorQuant matches or beats TurboQuant on real data despite worse synthetic MSE. The QJL residual correction compensates for a weaker Stage 1, and the Clifford rotor decorrelation better preserves the directional structure of real KV cache vectors.
-
 ## CUDA Kernels
 
 ### QJL Kernels (from [amirzandieh/QJL](https://github.com/amirzandieh/QJL))
@@ -210,27 +165,10 @@ Fused CUDA kernels for 1-bit quantization and attention score computation:
 Single fused kernel for the full RotorQuant pipeline on both NVIDIA and Apple Silicon:
 
 ```
-embed -> rotor_sandwich -> quantize -> inverse_sandwich -> extract
+normalize -> embed -> rotor_sandwich -> quantize -> inverse_sandwich -> extract -> rescale
 ```
 
 Exploits rotor sparsity (4 of 8 multivector components are zero) to cut FMAs by ~50%. Each thread handles one (batch, group) pair with rotors and codebooks in shared/threadgroup memory.
-
-**NVIDIA (CUDA) — RTX PRO 4000 Blackwell:**
-
-| n_vectors | TurboQuant | **RQ CUDA** | Speedup |
-|-----------|-----------|------------|---------|
-| 1,024 | 69 us | **6 us** | 11x faster |
-| 4,096 | 132 us | **12 us** | 11x faster |
-| 16,384 | 740 us | **39 us** | 19x faster |
-
-**Apple Silicon (Metal) — Mac Mini M4:**
-
-| n_vectors | TurboQuant (MPS) | **RQ Metal** | Speedup |
-|-----------|-----------------|-------------|---------|
-| 1,024 | 764 us | **471 us** | 1.6x faster |
-| 4,096 | 6.02 ms | **650 us** | 9.3x faster |
-| 16,384 | 21.94 ms | **1.12 ms** | 19.6x faster |
-| 65,536 | 86.46 ms | **2.76 ms** | 31.3x faster |
 
 Build:
 ```bash
@@ -242,7 +180,7 @@ xcrun -sdk macosx metal -c turboquant/rotor_fused.metal -o /tmp/rotor_fused.air 
 xcrun -sdk macosx metallib /tmp/rotor_fused.air -o turboquant/rotor_fused.metallib
 ```
 
-## Triton Kernels (NEW)
+## Triton Kernels
 
 Portable, auto-tuned GPU kernels using [Triton](https://github.com/triton-lang/triton) — no CUDA C++ compilation needed, works on both NVIDIA and AMD GPUs.
 
@@ -254,35 +192,6 @@ Inspired by [TurboQuant's Triton attention kernel](https://dejan.ai/blog/turboqu
 | `triton_rotor_full_fused` | Full quantize-dequantize pipeline | **128-652x** |
 | `triton_fused_attention` | Q@K^T on compressed keys (gather-dot) | 1.1-1.5x |
 | `triton_rotor_inverse_sandwich` | R̃ x R (dequantize path) | 80-166x |
-
-### Triton Benchmark Results (RTX 5090, d=128)
-
-**Full fused pipeline** — single kernel for embed→rotor→quantize→unrotor→extract:
-
-| n_vectors | PyTorch | Triton | Speedup |
-|-----------|---------|--------|---------|
-| 256 | 2.09 ms | 0.016 ms | **128x** |
-| 1,024 | 3.22 ms | 0.015 ms | **212x** |
-| 4,096 | 3.46 ms | 0.015 ms | **229x** |
-| 16,384 | 5.10 ms | 0.017 ms | **295x** |
-| 65,536 | 28.13 ms | 0.043 ms | **652x** |
-
-**Across embedding dimensions** (n=4096, 3-bit):
-
-| Dimension | Groups | PyTorch | Triton | Speedup |
-|-----------|--------|---------|--------|---------|
-| 64 | 22 | 3.05 ms | 0.017 ms | **180x** |
-| 128 | 43 | 3.15 ms | 0.016 ms | **198x** |
-| 256 | 86 | 2.33 ms | 0.016 ms | **150x** |
-| 512 | 171 | 5.54 ms | 0.016 ms | **346x** |
-
-**End-to-end vs TurboQuant** (16K vectors):
-
-| Bits | TQ PyTorch | RQ Triton | Speedup |
-|------|-----------|-----------|---------|
-| 2-bit | 0.12 ms | 0.015 ms | **8x** |
-| 3-bit | 0.21 ms | 0.015 ms | **14x** |
-| 4-bit | 0.51 ms | 0.018 ms | **29x** |
 
 ### Usage
 
@@ -321,11 +230,11 @@ These differ because Clifford algebra is non-commutative. The original CUDA kern
 | `test_turboquant.py` | Synthetic validation (codebook, MSE, QJL, needle) | `python -m turboquant.test_turboquant` |
 | `validate.py` | Real model validation (Qwen2.5-3B, all layers) | `python -m turboquant.validate` |
 | `validate_rotorquant.py` | RotorQuant vs TurboQuant on real model | `python -m turboquant.validate_rotorquant` |
-| `benchmark_triton.py` | **Triton vs PyTorch benchmark (6 tests)** | `python -m turboquant.benchmark_triton` |
+| `poc_high_context.py` | **High-context generation POC (2K-93K tokens)** | `python -m turboquant.poc_high_context` |
+| `benchmark_triton.py` | Triton vs PyTorch benchmark (6 tests) | `python -m turboquant.benchmark_triton` |
 | `benchmark_cuda.py` | PyTorch vs QJL CUDA kernel speed | `python -m turboquant.benchmark_cuda` |
 | `benchmark_rotorquant.py` | Full 7-test RotorQuant vs TurboQuant comparison | `python -m turboquant.benchmark_rotorquant` |
 | `benchmark_metal.py` | Metal shader benchmark (Apple Silicon) | `python -m turboquant.benchmark_metal` |
-| `benchmark_mps_bmm.py` | MPS batched 3x3 matmul benchmark | `python -m turboquant.benchmark_mps_bmm` |
 
 ## Project Structure
 
@@ -339,6 +248,7 @@ turboquant/
   triton_kernels.py          # Triton GPU kernels (rotor sandwich, full fused, attention)
   compressors.py             # Asymmetric inner product compressors for validation
   cuda_backend.py            # QJL CUDA kernel wrappers with PyTorch fallback
+  poc_high_context.py        # High-context generation POC
   csrc/
     rotor_fused_kernel.cu    # Fused RotorQuant CUDA kernel (NVIDIA)
     qjl_quant_kernel.cu      # QJL quantization kernel
@@ -358,11 +268,11 @@ setup.py                     # pip install with optional CUDA build
 - PyTorch 2.0+ with CUDA
 - scipy (for codebook computation)
 - triton >= 3.0 (for Triton GPU kernels — optional but recommended)
-- transformers, accelerate, bitsandbytes (for real model validation only)
+- transformers, accelerate, bitsandbytes (for real model validation and POC)
 
 ```bash
 pip install -e .                    # PyTorch-only
-pip install triton                  # Add Triton kernels (100-650x speedup)
+pip install triton                  # Add Triton kernels (100-650x faster quantize/dequantize)
 pip install -e ".[validate]"        # + model validation deps
 python setup.py build_ext --inplace # Build CUDA kernels (alternative to Triton)
 ```
@@ -372,19 +282,22 @@ python setup.py build_ext --inplace # Build CUDA kernels (alternative to Triton)
 | Scenario | Recommendation |
 |----------|---------------|
 | Standard KV cache compression | TurboQuant 3-bit (proven, well-understood) |
+| Long context on limited VRAM | **RotorQuant 3-bit + post-prefill quantization** |
 | Parameter-constrained (edge/mobile) | RotorQuant (44x fewer params) |
-| Maximum throughput (NVIDIA/AMD) | **RotorQuant + Triton** (100-650x faster, portable) |
-| Maximum throughput (NVIDIA only) | RotorQuant + CUDA kernel (10-19x faster) |
-| Apple Silicon | RotorQuant + Metal shader (up to 31x faster) |
+| Apple Silicon | RotorQuant + Metal shader |
 | Geometric data (3D, physics, robotics) | RotorQuant (preserves algebraic structure) |
+
+**Note**: RotorQuant is a **memory** optimization. It enables longer contexts by compressing the KV cache, but the quantize/dequantize overhead reduces generation speed (~2-7 tok/s vs ~40-50 tok/s FP16 baseline on Qwen2.5-3B). For speed parity, a fused attention kernel that computes Q@K^T directly from compressed indices (avoiding decompression) is needed — this is the approach TurboQuant uses.
 
 ## References
 
 - [TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate](https://arxiv.org/abs/2504.19874) (ICLR 2026)
 - [QJL: 1-Bit Quantized JL Transform for KV Cache Quantization](https://arxiv.org/abs/2406.03482)
+- [CommVQ: Commutative Vector Quantization for KV Cache Compression](https://arxiv.org/abs/2506.18879) (ICML 2025)
 - [PolarQuant: Quantizing KV Caches with Polar Transformation](https://arxiv.org/abs/2502.02617)
 - [QJL Reference Implementation](https://github.com/amirzandieh/QJL)
 - [CliffordNet: All You Need is Geometric Algebra](https://arxiv.org/abs/2601.06793) (Jan 2026)
+- [TurboQuant: From Paper to Triton Kernel](https://dejan.ai/blog/turboquant/)
 
 ## Citation
 
