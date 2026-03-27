@@ -92,20 +92,38 @@ RotorQuant replaces TurboQuant's d x d random orthogonal matrix with **Clifford 
 
 ### The Key Idea
 
-Instead of `Pi @ x` (16,384 multiply-adds for d=128), RotorQuant does `R x R_tilde` (rotor sandwich product) — only ~100 multiply-adds per vector, exploiting the algebraic structure of geometric algebra.
+Instead of `Pi @ x` (16,384 FMAs for d=128), RotorQuant chunks the vector into groups of 3 dims and rotates each with a 4-parameter rotor via the sandwich product `R v R̃` — **2,064 FMAs total** (7.9x fewer).
 
 **Cl(3,0) multivectors** have 8 components: `[1, e1, e2, e3, e12, e13, e23, e123]`
 
-A **rotor** R has only 4 non-zero components: `R = [s, 0, 0, 0, b12, b13, b23, 0]` (scalar + bivectors). This sparsity eliminates ~50% of the geometric product's FMAs.
+A **rotor** R has only 4 non-zero components: `R = [s, 0, 0, 0, b12, b13, b23, 0]` (scalar + bivectors).
+
+### FMA Count (d=128)
+
+The sandwich `R v R̃` requires two sparse geometric products per group:
+- **Step 1** (`R * v`, rotor LEFT): grade-1 input has 3 nonzero components → 4 nonzero outputs × 5 FMAs = **20 FMAs**
+- **Step 2** (`temp * R̃`, rotor RIGHT): 4 nonzero inputs → 4 outputs × 7 FMAs = **28 FMAs**
+- **Per group: 48 FMAs** × 43 groups = **2,064 FMAs** (sandwich only)
+
+Full pipeline including quantize + inverse sandwich: **4,816 FMAs** vs TurboQuant's **33,792 FMAs** (7.0x fewer).
+
+| | TurboQuant | RotorQuant | Ratio |
+|---|-----------|-----------|-------|
+| Rotation only | 16,384 FMAs | **2,064 FMAs** | **7.9x fewer** |
+| Full pipeline | 33,792 FMAs | **4,816 FMAs** | **7.0x fewer** |
+| Parameters | 16,384 | **~380** | **~44x fewer** |
+| Stored indices | 128/vector | 172/vector | 1.3x more |
+| 3-bit compression | 4.9x | 3.7x | TQ wins |
 
 ### Why Rotors?
 
 | Property | TurboQuant (Pi matrix) | RotorQuant (Rotor R) |
 |----------|----------------------|---------------------|
-| Parameters | d^2 = 16,384 | 8 per group x ceil(d/3) = 344 |
-| Operations | d^2 FMAs (matmul) | ~100 FMAs (sparse GP) |
+| Parameters | d^2 = 16,384 | 4 per group × ceil(d/3) = 172 |
+| FMAs per vector | 16,384 (dense matmul) | 2,064 (sparse per-group) |
 | Preserves | Norms + inner products | Norms + inner products + outer products + grades |
 | Composition | Pi2 Pi1 (matrix multiply) | R2 R1 (geometric product) |
+| GPU behavior | 1 cuBLAS call (peak FLOPS) | Fused Triton kernel (6-25x faster in practice) |
 
 ### Codebook Calibration Fix
 
@@ -134,7 +152,7 @@ The entire pipeline runs in a single kernel launch:
 embed (3 dims -> multivector) -> R x R_tilde -> Lloyd-Max quantize -> R_tilde x R -> extract
 ```
 
-Each thread handles one (batch_item, group) pair. Rotors and codebooks are loaded into shared memory. The sparse geometric product uses only 28 FMAs instead of 64 for the full product.
+Each thread handles one (batch, group) pair. Rotors and codebooks are loaded into shared memory. The sparse geometric product exploits rotor sparsity (4 of 8 components nonzero) and grade-1 input sparsity (only vector + trivector outputs) for 48 FMAs per group vs 128 for the full 8×8 product.
 
 ## Real Model Validation
 
