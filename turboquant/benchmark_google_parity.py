@@ -66,7 +66,7 @@ def make_patcher(bits, device="cuda"):
         rq, pk = compressors[li]
         flat = ks.reshape(-1, D).float()
         kq = triton_rotor_full_fused(flat, pk, None,
-            getattr(rq, 'centroids_vector'), None, getattr(rq, 'centroids_trivector'))
+            getattr(rq, 'centroids_vector'), None, None)
         return kq.to(ks.dtype).reshape(ks.shape)
 
     _orig = DynamicCache.update
