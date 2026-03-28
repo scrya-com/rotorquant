@@ -37,7 +37,6 @@ class RotorQuantKeyCompressor:
         self.rq = RotorQuantMSE(head_dim, bits, seed=seed, device=device)
         self.packed_rotors = pack_rotors_for_triton(self.rq.rotors).to(device)
         self.c_v = getattr(self.rq, 'centroids_vector').to(device)
-        self.c_t = getattr(self.rq, 'centroids_trivector').to(device)
         self.head_dim = head_dim
         self.device = device
 
@@ -59,7 +58,7 @@ class RotorQuantKeyCompressor:
         # Triton fused: embed→rotor→quantize→unrotor→extract
         flat_recon = triton_rotor_full_fused(
             flat, self.packed_rotors,
-            None, self.c_v, None, self.c_t,
+            None, self.c_v, None, None,
         )
 
         return flat_recon.to(orig_dtype).reshape(B, H, S, D)

@@ -94,7 +94,7 @@ def compute_perplexity_with_rq(model, tokenizer, dataset_text, bits=3,
             flat, pk, None,
             getattr(rq, 'centroids_vector'),
             None,
-            getattr(rq, 'centroids_trivector'),
+            None,
         )
         return kq.to(ks.dtype).reshape(ks.shape)
 

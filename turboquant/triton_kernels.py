@@ -289,7 +289,7 @@ def triton_rotor_full_fused(
     c_s = c_scalar.float().contiguous() if c_scalar is not None else c_vector.float().contiguous()
     c_v = c_vector.float().contiguous()
     c_b = c_bivector.float().contiguous() if c_bivector is not None else c_vector.float().contiguous()
-    c_t = c_trivector.float().contiguous()
+    c_t = c_trivector.float().contiguous() if c_trivector is not None else c_vector.float().contiguous()
 
     output = torch.empty_like(input_f32)
 

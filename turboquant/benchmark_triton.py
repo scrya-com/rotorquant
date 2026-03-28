@@ -114,7 +114,7 @@ def verify_correctness():
     c_scalar = None
     c_vector = getattr(rq, 'centroids_vector')
     c_bivector = None
-    c_trivector = getattr(rq, 'centroids_trivector')
+    c_trivector = None
 
     x_hat_triton = triton_rotor_full_fused(
         x, packed_rotors, c_scalar, c_vector, c_bivector, c_trivector)
@@ -197,7 +197,7 @@ def benchmark_full_fused():
     c_s = None
     c_v = getattr(rq, 'centroids_vector')
     c_b = None
-    c_t = getattr(rq, 'centroids_trivector')
+    c_t = None
 
     print(f"  GPU: {torch.cuda.get_device_name()}")
     print(f"  d={d}, bits={bits}\n")
@@ -328,7 +328,7 @@ def benchmark_varying_dimensions():
         c_s = None
         c_v = getattr(rq, 'centroids_vector')
         c_b = None
-        c_t = getattr(rq, 'centroids_trivector')
+        c_t = None
         n_groups = (d + 2) // 3
 
         x = torch.randn(n, d, device=device)
@@ -381,7 +381,7 @@ def benchmark_vs_turboquant():
         c_s = None
         c_v = getattr(rq, 'centroids_vector')
         c_b = None
-        c_t = getattr(rq, 'centroids_trivector')
+        c_t = None
 
         for n in [1024, 4096, 16384]:
             x = torch.randn(n, d, device=device)
@@ -437,7 +437,7 @@ def benchmark_bitwidth_sweep():
         c_s = None
         c_v = getattr(rq, 'centroids_vector')
         c_b = None
-        c_t = getattr(rq, 'centroids_trivector')
+        c_t = None
 
         # Quality
         x_hat_pt, _ = rq(x)
