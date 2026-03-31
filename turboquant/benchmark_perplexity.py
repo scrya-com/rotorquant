@@ -69,34 +69,79 @@ def compute_perplexity(model, tokenizer, dataset_text, max_length=2048, stride=5
     return ppl, n_tokens
 
 
+def _make_compressor(backend, bits, device):
+    """Create a key compressor function for the given backend.
+
+    Returns a function: compress(keys_tensor, layer_idx) -> quantized_keys
+    """
+    compressors = {}
+
+    if backend == 'rotorquant':
+        from turboquant.rotorquant import RotorQuantMSE
+        from turboquant.triton_kernels import triton_rotor_full_fused, pack_rotors_for_triton
+
+        def compress(ks, li):
+            D = ks.shape[-1]
+            if li not in compressors:
+                rq = RotorQuantMSE(D, bits, seed=li * 1000, device=device)
+                pk = pack_rotors_for_triton(rq.rotors).to(device)
+                compressors[li] = (rq, pk)
+            rq, pk = compressors[li]
+            flat = ks.reshape(-1, D)
+            c_v = getattr(rq, 'centroids_vector', None)
+            c_t = getattr(rq, 'centroids_trivector', None)
+            if c_t is None:
+                c_t = c_v  # fallback: use same centroids for all grades
+            kq = triton_rotor_full_fused(flat, pk, None, c_v, None, c_t)
+            return kq.to(ks.dtype).reshape(ks.shape)
+
+    elif backend == 'isoquant':
+        from turboquant.isoquant import IsoQuantMSE
+        from turboquant.triton_isoquant import triton_iso_fast_fused
+
+        def compress(ks, li):
+            D = ks.shape[-1]
+            if li not in compressors:
+                iq = IsoQuantMSE(D, bits, seed=li * 1000, mode='fast', device=device)
+                compressors[li] = iq
+            iq = compressors[li]
+            flat = ks.reshape(-1, D)
+            kq = triton_iso_fast_fused(flat, iq.q_L, iq.centroids)
+            return kq.to(ks.dtype).reshape(ks.shape)
+
+    elif backend == 'planarquant':
+        from turboquant.planarquant import PlanarQuantMSE
+        from turboquant.triton_planarquant import triton_planar2_fused
+
+        def compress(ks, li):
+            D = ks.shape[-1]
+            if li not in compressors:
+                pq = PlanarQuantMSE(D, bits, seed=li * 1000, device=device)
+                compressors[li] = pq
+            pq = compressors[li]
+            flat = ks.reshape(-1, D)
+            kq = triton_planar2_fused(flat, pq.rot2, pq.centroids)
+            return kq.to(ks.dtype).reshape(ks.shape)
+
+    else:
+        raise ValueError(f"Unknown backend: {backend}")
+
+    return compress
+
+
 def compute_perplexity_with_rq(model, tokenizer, dataset_text, bits=3,
-                                max_length=2048, stride=512, device="cuda"):
-    """Compute perplexity with RotorQuant KV cache compression.
+                                max_length=2048, stride=512, device="cuda",
+                                backend="rotorquant"):
+    """Compute perplexity with quantized KV cache compression.
 
     Quantizes keys during the forward pass so attention sees quantized keys.
     This measures the actual quality impact of KV cache quantization.
+
+    backend: 'rotorquant', 'isoquant', or 'planarquant'
     """
     from transformers import DynamicCache
-    from turboquant.rotorquant import RotorQuantMSE
-    from turboquant.triton_kernels import triton_rotor_full_fused, pack_rotors_for_triton
 
-    compressors = {}
-
-    def compress(ks, li):
-        D = ks.shape[-1]
-        if li not in compressors:
-            rq = RotorQuantMSE(D, bits, seed=li * 1000, device=device)
-            pk = pack_rotors_for_triton(rq.rotors).to(device)
-            compressors[li] = (rq, pk)
-        rq, pk = compressors[li]
-        flat = ks.reshape(-1, D)
-        kq = triton_rotor_full_fused(
-            flat, pk, None,
-            getattr(rq, 'centroids_vector'),
-            None,
-            getattr(rq, 'centroids_trivector'),
-        )
-        return kq.to(ks.dtype).reshape(ks.shape)
+    compress = _make_compressor(backend, bits, device)
 
     _orig = DynamicCache.update
 
@@ -147,9 +192,12 @@ def compute_perplexity_with_rq(model, tokenizer, dataset_text, bits=3,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="RotorQuant Perplexity Benchmark")
+    parser = argparse.ArgumentParser(description="KV Cache Quantization Perplexity Benchmark")
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-3B-Instruct")
-    parser.add_argument("--bits", type=int, nargs="+", default=[2, 3, 4])
+    parser.add_argument("--bits", type=int, nargs="+", default=[3, 4])
+    parser.add_argument("--backends", type=str, nargs="+",
+                        default=["rotorquant", "isoquant", "planarquant"],
+                        help="Backends to benchmark")
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--stride", type=int, default=512)
     parser.add_argument("--max-tokens", type=int, default=0,
@@ -159,14 +207,21 @@ def main():
     os.environ['TRANSFORMERS_NO_ADVISORY_WARNINGS'] = '1'
     import logging; logging.disable(logging.WARNING)
 
+    backend_names = {
+        'rotorquant': 'RotorQuant',
+        'isoquant': 'IsoQuant',
+        'planarquant': 'PlanarQuant',
+    }
+
     print()
-    print("=" * 70)
-    print("  RotorQuant Perplexity Benchmark (wikitext-2)")
+    print("=" * 75)
+    print("  KV Cache Quantization Perplexity Benchmark (wikitext-2)")
     print(f"  Model: {args.model}")
     print(f"  Bits: {args.bits}")
+    print(f"  Backends: {[backend_names.get(b, b) for b in args.backends]}")
     print(f"  Window: {args.max_length}, stride: {args.stride}")
     print(f"  GPU: {torch.cuda.get_device_name()}")
-    print("=" * 70)
+    print("=" * 75)
 
     # Load dataset
     print("\nLoading wikitext-2...", flush=True)
@@ -210,40 +265,39 @@ def main():
     print(f"  FP16:     PPL = {ppl_fp16:.2f}  ({n_tok:,} tokens, {t_fp16:.1f}s)")
     print()
 
-    # RotorQuant: roundtrip during forward pass (worst case — compounding)
+    # All backends × all bit widths
     print("  Roundtrip quantization (keys quantized during forward pass):")
-    print(f"  {'Method':>15s}  {'PPL':>8s}  {'Delta':>8s}  {'%change':>8s}  {'Time':>8s}")
-    print(f"  {'─'*15}  {'─'*8}  {'─'*8}  {'─'*8}  {'─'*8}")
-    print(f"  {'FP16':>15s}  {ppl_fp16:>8.2f}  {'—':>8s}  {'—':>8s}  {t_fp16:>6.1f}s")
+    print(f"  {'Method':>20s}  {'PPL':>8s}  {'Delta':>8s}  {'%change':>8s}  {'Time':>8s}")
+    print(f"  {'─'*20}  {'─'*8}  {'─'*8}  {'─'*8}  {'─'*8}")
+    print(f"  {'FP16':>20s}  {ppl_fp16:>8.2f}  {'—':>8s}  {'—':>8s}  {t_fp16:>6.1f}s")
 
     for bits in args.bits:
-        torch.cuda.empty_cache()
-        gc.collect()
+        for backend in args.backends:
+            torch.cuda.empty_cache()
+            gc.collect()
 
-        t0 = time.perf_counter()
-        ppl_rq, n_tok = compute_perplexity_with_rq(
-            model, tokenizer, text, bits=bits,
-            max_length=args.max_length, stride=args.stride,
-        )
-        t_rq = time.perf_counter() - t0
+            name = f"{backend_names.get(backend, backend)} {bits}b"
 
-        delta = ppl_rq - ppl_fp16
-        pct = (ppl_rq - ppl_fp16) / ppl_fp16 * 100
+            try:
+                t0 = time.perf_counter()
+                ppl, n_tok = compute_perplexity_with_rq(
+                    model, tokenizer, text, bits=bits,
+                    max_length=args.max_length, stride=args.stride,
+                    backend=backend,
+                )
+                t_elapsed = time.perf_counter() - t0
 
-        print(f"  {'RQ ' + str(bits) + '-bit':>15s}  {ppl_rq:>8.2f}  {delta:>+8.2f}  {pct:>+7.1f}%  {t_rq:>6.1f}s")
+                delta = ppl - ppl_fp16
+                pct = (ppl - ppl_fp16) / ppl_fp16 * 100
+
+                print(f"  {name:>20s}  {ppl:>8.2f}  {delta:>+8.2f}  {pct:>+7.1f}%  {t_elapsed:>6.1f}s")
+            except Exception as e:
+                print(f"  {name:>20s}  {'ERROR':>8s}  {str(e)[:40]}")
 
     print()
-    print("  NOTE: Roundtrip quantization degrades perplexity for ALL methods")
-    print("  (TurboQuant roundtrip is even worse: PPL ~12,000).")
-    print("  Google's 'zero accuracy loss' requires the fused attention kernel")
-    print("  which computes Q@K^T directly from compressed keys without roundtrip.")
-    print("  The post-prefill strategy (used for generation) avoids this by running")
-    print("  prefill at full FP16 precision.")
-
-    print()
-    print("=" * 70)
+    print("=" * 75)
     print("DONE")
-    print("=" * 70)
+    print("=" * 75)
 
 
 if __name__ == "__main__":
