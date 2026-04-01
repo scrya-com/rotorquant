@@ -123,6 +123,17 @@ def _make_compressor(backend, bits, device):
             kq = triton_planar2_fused(flat, pq.rot2, pq.centroids)
             return kq.to(ks.dtype).reshape(ks.shape)
 
+    elif backend == 'literatiquant':
+        from turboquant.literatiquant import quantize_literati, compute_scales_mean_abs
+
+        def compress(ks, li):
+            D = ks.shape[-1]
+            flat = ks.reshape(-1, D)
+            # 1-bit: sign * mean_abs_scale per group of 128
+            scales = compute_scales_mean_abs(flat, group_size=128)
+            kq = quantize_literati(flat, scales, group_size=128)
+            return kq.to(ks.dtype).reshape(ks.shape)
+
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -196,7 +207,7 @@ def main():
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-3B-Instruct")
     parser.add_argument("--bits", type=int, nargs="+", default=[3, 4])
     parser.add_argument("--backends", type=str, nargs="+",
-                        default=["rotorquant", "isoquant", "planarquant"],
+                        default=["rotorquant", "isoquant", "planarquant", "literatiquant"],
                         help="Backends to benchmark")
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--stride", type=int, default=512)
@@ -211,6 +222,7 @@ def main():
         'rotorquant': 'RotorQuant',
         'isoquant': 'IsoQuant',
         'planarquant': 'PlanarQuant',
+        'literatiquant': 'LiteratiQuant',
     }
 
     print()
