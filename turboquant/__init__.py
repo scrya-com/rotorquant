@@ -16,7 +16,7 @@ from .clifford import geometric_product, make_random_rotor, rotor_sandwich
 QuantMSE = IsoQuantMSE
 QuantProd = IsoQuantProd
 
-# Triton kernels (optional, requires triton >= 3.0)
+# Triton kernels (optional, requires triton >= 3.0 and an active GPU driver)
 try:
     from .triton_planarquant import (
         triton_planar2_fused,
@@ -46,5 +46,5 @@ try:
         pack_rotors_for_triton,
     )
     _triton_available = True
-except ImportError:
+except (ImportError, RuntimeError):
     _triton_available = False
