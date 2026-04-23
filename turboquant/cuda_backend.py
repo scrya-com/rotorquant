@@ -10,6 +10,7 @@ Falls back to pure PyTorch if kernels are not available.
 
 import math
 import os
+import glob
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
@@ -21,7 +22,9 @@ try:
     _kernel_dir = os.path.dirname(os.path.abspath(__file__))
     import importlib.util
     for mod_name in ['cuda_qjl_quant', 'cuda_qjl_score', 'cuda_qjl_gqa_score', 'quantization']:
-        so_path = os.path.join(_kernel_dir, f'{mod_name}.cpython-312-x86_64-linux-gnu.so')
+        # Search for any .so file that starts with the module name. (adds support for non-x86)
+        so_files = glob.glob(os.path.join(_kernel_dir, f'{mod_name}.*.so'))
+        so_path = so_files[0] if so_files else ""
         if os.path.exists(so_path):
             spec = importlib.util.spec_from_file_location(mod_name, so_path)
             mod = importlib.util.module_from_spec(spec)

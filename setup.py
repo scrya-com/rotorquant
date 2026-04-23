@@ -22,6 +22,17 @@ if '--cuda' in sys.argv:
 if build_cuda or 'build_ext' in sys.argv:
     try:
         from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+        import torch
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability()
+            # If we detect Blackwell (12.x), force "+ PTX" for compatibility
+            if major >= 12:
+                arch_list = f"{major}.{minor}+PTX"
+            else:
+                arch_list = f"{major}.{minor}"
+            print(f"Auto-detected GPU architecture: {arch_list}")
+            # Force-set the architecture environment variable so PyTorch sees it
+            os.environ['TORCH_CUDA_ARCH_LIST'] = arch_list
 
         def nvcc_flags():
             nvcc_threads = os.getenv("NVCC_THREADS", "8")
