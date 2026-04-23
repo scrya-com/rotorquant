@@ -182,7 +182,30 @@ python -m turboquant.benchmark_triton                  # Triton kernel speed
 python -m turboquant.poc_high_context --backend planar  # High-context generation
 ```
 
-## Acknowledgments
+## MiniMax-M2.7 Compatibility
+
+IsoQuant and PlanarQuant work out-of-the-box with [MiniMax-M2.7](https://huggingface.co/MiniMaxAI/MiniMax-M2.7),
+a 230B MoE model with 204K context and Grouped Query Attention (48 query heads / 8 KV heads).
+
+**Architecture fit:**
+- `head_dim = 128` — perfect alignment for IsoQuant 4D blocks (128 / 4 = 32 groups) and PlanarQuant 2D pairs (128 / 2 = 64 groups)
+- `num_kv_heads = 8` — each head compressed independently, GQA expansion handled by the model
+
+**Projected KV cache savings at 32K context (62 layers, 8 KV heads):**
+
+| Format | Memory | vs FP16 |
+|--------|--------|---------|
+| FP16 | 3.88 GB | baseline |
+| IsoQuant 4-bit | ~1.47 GB | **2.6x** |
+| IsoQuant 3-bit | ~1.13 GB | **3.4x** |
+
+**Validate (requires GPU + `pip install -e ".[validate]"`):**
+
+```bash
+python -m turboquant.validate_minimax_m2                 # synthetic + real model
+python -m turboquant.validate_minimax_m2 --dry-run       # synthetic only (no model download)
+python -m pytest tests/test_minimax_m2.py -v             # unit tests (no model required)
+```
 
 **[ParaMind2025](https://github.com/ParaMind2025)** — PlanarQuant (2D Givens rotation) and IsoQuant (4D quaternion rotation) were designed by ParaMind2025. Their insight that simple block-diagonal rotations could match full-rank transforms for KV cache decorrelation made the llama.cpp integration practical.
 
