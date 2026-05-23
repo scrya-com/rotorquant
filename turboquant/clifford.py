@@ -30,34 +30,50 @@ def geometric_product(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     Multiplication table for Cl(3,0) with signature (+,+,+):
         e_i * e_i = +1  for i in {1,2,3}
         e_i * e_j = -e_j * e_i  for i != j
+
+    Basis ordering: [s, e1, e2, e3, e12, e13, e23, e123] where
+    e12 = e1 e2, e13 = e1 e3, e23 = e2 e3, e123 = e1 e2 e3.
+
+    The Cayley table below was derived from scratch via bubble-sort sign
+    tracking of basis-vector concatenations, collapsing e_i^2 = +1.
+    Each term is the sign of moving the right operand's basis vectors
+    past the left operand's basis vectors into canonical order. Spot
+    check: e23 * e123 = (e2 e3)(e1 e2 e3); moving e1 leftward past
+    e2 e3 picks up two sign flips, leaving e1 e2 e3 e2 e3 = -e1 after
+    collapsing e_i^2 -> +1, so the (a23, b123) coefficient on r1 must
+    be -1 (not +1 as in earlier revisions of this file).
+
+    Verified by (a*b)*c == a*(b*c) on random multivectors; see
+    tests/test_clifford.py::TestGeometricProduct::test_associativity.
     """
     # Unbind components
     a0, a1, a2, a3, a12, a13, a23, a123 = a.unbind(dim=-1)
     b0, b1, b2, b3, b12, b13, b23, b123 = b.unbind(dim=-1)
 
-    # Grade 0 (scalar)
+    # Grade 0 (scalar). e123 squares to -1 in Cl(3,0):
+    # e123^2 = (e1 e2 e3)(e1 e2 e3) = -e1 e1 e2 e2 e3 e3 = -1.
     r0 = (a0*b0 + a1*b1 + a2*b2 + a3*b3
            - a12*b12 - a13*b13 - a23*b23 - a123*b123)
 
     # Grade 1 (vectors)
     r1 = (a0*b1 + a1*b0 - a2*b12 + a12*b2 - a3*b13 + a13*b3
-           + a23*b123 + a123*b23)
+           - a23*b123 - a123*b23)
     r2 = (a0*b2 + a2*b0 + a1*b12 - a12*b1 - a3*b23 + a23*b3
-           - a13*b123 - a123*b13)
+           + a13*b123 + a123*b13)
     r3 = (a0*b3 + a3*b0 + a1*b13 - a13*b1 + a2*b23 - a23*b2
-           + a12*b123 + a123*b12)
+           - a12*b123 - a123*b12)
 
     # Grade 2 (bivectors)
-    r12 = (a0*b12 + a12*b0 + a1*b2 - a2*b1 + a13*b23 - a23*b13
-            + a3*b123 - a123*b3)
-    r13 = (a0*b13 + a13*b0 + a1*b3 - a3*b1 - a12*b23 + a23*b12
-            - a2*b123 + a123*b2)
-    r23 = (a0*b23 + a23*b0 + a2*b3 - a3*b2 + a12*b13 - a13*b12
-            + a1*b123 - a123*b1)
+    r12 = (a0*b12 + a12*b0 + a1*b2 - a2*b1 - a13*b23 + a23*b13
+            + a3*b123 + a123*b3)
+    r13 = (a0*b13 + a13*b0 + a1*b3 - a3*b1 + a12*b23 - a23*b12
+            - a2*b123 - a123*b2)
+    r23 = (a0*b23 + a23*b0 + a2*b3 - a3*b2 - a12*b13 + a13*b12
+            + a1*b123 + a123*b1)
 
     # Grade 3 (pseudoscalar)
-    r123 = (a0*b123 + a123*b0 + a1*b23 - a23*b1 - a2*b13 + a13*b2
-             + a3*b12 - a12*b3)
+    r123 = (a0*b123 + a123*b0 + a1*b23 + a23*b1 - a2*b13 - a13*b2
+             + a3*b12 + a12*b3)
 
     return torch.stack([r0, r1, r2, r3, r12, r13, r23, r123], dim=-1)
 
