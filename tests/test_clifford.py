@@ -41,10 +41,15 @@ class TestGeometricProduct:
         r = geometric_product(e2, e1)
         assert torch.allclose(r[4], torch.tensor(-1.0), atol=1e-6)
 
-    @pytest.mark.xfail(reason="Full GP table has a sign error in some terms; "
-                       "RotorQuant uses the sparse GP path which is correct")
     def test_associativity(self):
-        """(a * b) * c == a * (b * c)."""
+        """(a * b) * c == a * (b * c).
+
+        Associativity is a foundational axiom of any Clifford / geometric
+        algebra. Prior revisions of this file carried sign errors in
+        r1/r2/r3/r12/r13/r23/r123 that caused this test to fail and was
+        previously marked xfail; the fix derives the Cayley table from
+        scratch via bubble-sort sign tracking and restores associativity.
+        """
         torch.manual_seed(42)
         a = torch.randn(8)
         b = torch.randn(8)
@@ -52,6 +57,108 @@ class TestGeometricProduct:
         lhs = geometric_product(geometric_product(a, b), c)
         rhs = geometric_product(a, geometric_product(b, c))
         assert torch.allclose(lhs, rhs, atol=1e-5)
+
+    def test_associativity_batch(self):
+        """Associativity across a batch of random multivectors."""
+        torch.manual_seed(7)
+        a = torch.randn(16, 8)
+        b = torch.randn(16, 8)
+        c = torch.randn(16, 8)
+        lhs = geometric_product(geometric_product(a, b), c)
+        rhs = geometric_product(a, geometric_product(b, c))
+        assert torch.allclose(lhs, rhs, atol=1e-5)
+
+    def test_scalar_identity_left(self):
+        """1 * x == x for arbitrary multivector x."""
+        torch.manual_seed(42)
+        one = torch.tensor([1.0, 0, 0, 0, 0, 0, 0, 0])
+        x = torch.randn(8)
+        assert torch.allclose(geometric_product(one, x), x, atol=1e-6)
+
+    def test_scalar_identity_right(self):
+        """x * 1 == x for arbitrary multivector x."""
+        torch.manual_seed(42)
+        one = torch.tensor([1.0, 0, 0, 0, 0, 0, 0, 0])
+        x = torch.randn(8)
+        assert torch.allclose(geometric_product(x, one), x, atol=1e-6)
+
+    def test_basis_vector_squares(self):
+        """e_i * e_i = +1 for i in {1, 2, 3}; e_ij * e_ij = -1 for grade-2."""
+        def basis(idx):
+            v = torch.zeros(8)
+            v[idx] = 1.0
+            return v
+
+        # Grade-1 squares
+        for i in (1, 2, 3):
+            r = geometric_product(basis(i), basis(i))
+            expected = torch.zeros(8); expected[0] = 1.0
+            assert torch.allclose(r, expected, atol=1e-6), f"e{i}^2 != +1"
+
+        # Grade-2 squares are -1
+        for i in (4, 5, 6):
+            r = geometric_product(basis(i), basis(i))
+            expected = torch.zeros(8); expected[0] = -1.0
+            assert torch.allclose(r, expected, atol=1e-6), f"e_{i}^2 != -1"
+
+        # Pseudoscalar squares to -1
+        r = geometric_product(basis(7), basis(7))
+        expected = torch.zeros(8); expected[0] = -1.0
+        assert torch.allclose(r, expected, atol=1e-6), "e123^2 != -1"
+
+    def test_basis_vector_anticommutation(self):
+        """e_i * e_j = -e_j * e_i for i != j in {1,2,3}."""
+        def basis(idx):
+            v = torch.zeros(8)
+            v[idx] = 1.0
+            return v
+
+        for i, j in [(1, 2), (1, 3), (2, 3)]:
+            r_ij = geometric_product(basis(i), basis(j))
+            r_ji = geometric_product(basis(j), basis(i))
+            assert torch.allclose(r_ij, -r_ji, atol=1e-6), (
+                f"e{i}*e{j} != -e{j}*e{i}"
+            )
+
+    def test_e1_e2_e3_chain_associates(self):
+        """(e1 * e2) * e3 == e1 * (e2 * e3) == e123.
+
+        Specific instance of associativity that was broken in the prior
+        Cayley table. (e1*e2) = e12 and e12 * e3 = e123. Separately,
+        (e2*e3) = e23 and e1 * e23 = e123. Both routes must agree.
+        """
+        e1 = torch.tensor([0, 1.0, 0, 0, 0, 0, 0, 0])
+        e2 = torch.tensor([0, 0, 1.0, 0, 0, 0, 0, 0])
+        e3 = torch.tensor([0, 0, 0, 1.0, 0, 0, 0, 0])
+
+        left = geometric_product(geometric_product(e1, e2), e3)
+        right = geometric_product(e1, geometric_product(e2, e3))
+
+        expected = torch.zeros(8); expected[7] = 1.0  # e123
+        assert torch.allclose(left, expected, atol=1e-6)
+        assert torch.allclose(right, expected, atol=1e-6)
+        assert torch.allclose(left, right, atol=1e-6)
+
+    def test_e23_times_e123(self):
+        """e23 * e123 = -e1.
+
+        Derivation: (e2 e3)(e1 e2 e3); move e1 leftward past e2 and e3
+        with two sign flips: e2 e3 e1 e2 e3 = e1 e2 e3 e2 e3 = -e1 after
+        collapsing e_i^2 -> +1. This was wrong in the prior Cayley table.
+        """
+        e23 = torch.tensor([0, 0, 0, 0, 0, 0, 1.0, 0])
+        e123 = torch.tensor([0, 0, 0, 0, 0, 0, 0, 1.0])
+        r = geometric_product(e23, e123)
+        expected = torch.tensor([0, -1.0, 0, 0, 0, 0, 0, 0])
+        assert torch.allclose(r, expected, atol=1e-6)
+
+    def test_e12_times_e3(self):
+        """e12 * e3 = e123."""
+        e12 = torch.tensor([0, 0, 0, 0, 1.0, 0, 0, 0])
+        e3 = torch.tensor([0, 0, 0, 1.0, 0, 0, 0, 0])
+        r = geometric_product(e12, e3)
+        expected = torch.zeros(8); expected[7] = 1.0
+        assert torch.allclose(r, expected, atol=1e-6)
 
     def test_batch_dimensions(self):
         """GP should work with batch dims."""
